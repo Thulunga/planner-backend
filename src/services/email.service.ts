@@ -1,6 +1,8 @@
 import tls from 'tls';
 
 const DEFAULT_SMTP_PORT = 465;
+const DEFAULT_SMTP_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_SMTP_RESPONSE_TIMEOUT_MS = 10_000;
 
 const getBoolEnv = (value: string | undefined, defaultValue: boolean) => {
   if (value === undefined) {
@@ -13,6 +15,13 @@ const getBoolEnv = (value: string | undefined, defaultValue: boolean) => {
 const readResponse = (socket: tls.TLSSocket): Promise<string> => {
   return new Promise((resolve, reject) => {
     let buffer = '';
+    const responseTimeoutMs = Number(
+      process.env.SMTP_RESPONSE_TIMEOUT_MS ?? DEFAULT_SMTP_RESPONSE_TIMEOUT_MS
+    );
+    const responseTimeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`SMTP response timeout after ${responseTimeoutMs}ms`));
+    }, responseTimeoutMs);
 
     const onData = (chunk: Buffer) => {
       buffer += chunk.toString('utf8');
@@ -35,6 +44,7 @@ const readResponse = (socket: tls.TLSSocket): Promise<string> => {
     };
 
     const cleanup = () => {
+      clearTimeout(responseTimeout);
       socket.off('data', onData);
       socket.off('error', onError);
     };
@@ -67,6 +77,9 @@ const sendUsingSmtp = async (email: string, otp: string) => {
   const smtpPass = process.env.SMTP_PASS;
   const mailFrom = process.env.MAIL_FROM;
   const smtpSecure = getBoolEnv(process.env.SMTP_SECURE, true);
+  const smtpConnectTimeoutMs = Number(
+    process.env.SMTP_CONNECT_TIMEOUT_MS ?? DEFAULT_SMTP_CONNECT_TIMEOUT_MS
+  );
 
   if (!smtpHost || !smtpUser || !smtpPass || !mailFrom) {
     throw new Error('SMTP is not fully configured. Missing SMTP_HOST/SMTP_USER/SMTP_PASS/MAIL_FROM');
@@ -81,11 +94,34 @@ const sendUsingSmtp = async (email: string, otp: string) => {
     port: smtpPort,
     rejectUnauthorized: true,
     servername: smtpHost,
+    timeout: smtpConnectTimeoutMs,
   });
 
   await new Promise<void>((resolve, reject) => {
-    socket.once('secureConnect', resolve);
-    socket.once('error', reject);
+    const onTimeout = () => {
+      cleanup();
+      socket.destroy(new Error(`SMTP connect timeout after ${smtpConnectTimeoutMs}ms`));
+    };
+
+    const onSecureConnect = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+
+    const cleanup = () => {
+      socket.off('timeout', onTimeout);
+      socket.off('secureConnect', onSecureConnect);
+      socket.off('error', onError);
+    };
+
+    socket.once('timeout', onTimeout);
+    socket.once('secureConnect', onSecureConnect);
+    socket.once('error', onError);
   });
 
   try {
@@ -134,6 +170,10 @@ const sendUsingSmtp = async (email: string, otp: string) => {
 
 export const sendOtpEmail = async (email: string, otp: string) => {
   const provider = process.env.MAIL_PROVIDER ?? 'log';
+  const fallbackToLogOnError = getBoolEnv(
+    process.env.MAIL_FALLBACK_TO_LOG_ON_ERROR,
+    process.env.NODE_ENV !== 'production'
+  );
 
   if (provider === 'log') {
     console.log(`📧 OTP for ${email}: ${otp}`);
@@ -144,6 +184,16 @@ export const sendOtpEmail = async (email: string, otp: string) => {
     throw new Error(`Unsupported MAIL_PROVIDER: ${provider}`);
   }
 
-  await sendUsingSmtp(email, otp);
-  return { delivered: true, mode: 'smtp' as const };
+  try {
+    await sendUsingSmtp(email, otp);
+    return { delivered: true, mode: 'smtp' as const };
+  } catch (error) {
+    if (!fallbackToLogOnError) {
+      throw error;
+    }
+
+    console.error('SMTP send failed, falling back to log mode:', error);
+    console.log(`📧 OTP for ${email}: ${otp}`);
+    return { delivered: false, mode: 'log' as const };
+  }
 };
