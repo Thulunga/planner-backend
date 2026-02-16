@@ -3,6 +3,7 @@ import cors from 'cors';
 import authRoutes from './routes/auth.routes';
 import userRoutes from './routes/user.routes';
 import budgeRoutes from './routes/budget.routes'
+import taskRoutes from './routes/task.routes';
 import { seedExpenseCategories } from './seed/expense-category.seed';
 import { seedBudgetDevData } from './seed/budget-dev.seed';
 
@@ -22,5 +23,6 @@ app.get('/health', (_req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/budjet', budgeRoutes)
 app.use('/api/users', userRoutes);
+app.use('/api/tasks', taskRoutes);
 
 export default app;
