@@ -4,6 +4,8 @@ import { User } from '../models/user.model';
 import { Otp } from '../models/otp.model';
 import { generateAccessToken } from '../config/jwt';
 import { verifyGoogleToken } from '../services/google.service';
+import { sendOtpEmail } from '../services/email.service';
+import { AuthRequest } from '../middlewares/auth.middleware';
 
 export const register = async (req: Request, res: Response) => {
   try {
@@ -47,14 +49,24 @@ export const register = async (req: Request, res: Response) => {
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     });
 
-    // 7. TEMP: log OTP (email service comes next)
-    console.log(`📧 OTP for ${email}: ${otp}`);
+    // 7. Send OTP email (smtp in production, console in local mode)
+    const emailStatus = await sendOtpEmail(email, otp);
+    if (!emailStatus.delivered && emailStatus.mode === 'log') {
+      console.warn('MAIL_PROVIDER=log active. OTP is printed in logs only.');
+    }
 
     return res.status(201).json({
       message: 'Registration successful. OTP sent to email.',
     });
   } catch (error) {
     console.error('Register error:', error);
+
+    const email = req.body?.email;
+    if (email) {
+      await Otp.deleteMany({ email });
+      await User.deleteOne({ email, emailVerified: false });
+    }
+
     return res.status(500).json({
       message: 'Something went wrong',
     });
@@ -176,8 +188,11 @@ export const resendEmailOtp = async (req: Request, res: Response) => {
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     });
 
-    // 7. TEMP: log OTP
-    console.log(`📧 RESEND OTP for ${email}: ${otp}`);
+    // 7. Send new OTP email
+    const emailStatus = await sendOtpEmail(email, otp);
+    if (!emailStatus.delivered && emailStatus.mode === 'log') {
+      console.warn('MAIL_PROVIDER=log active. OTP is printed in logs only.');
+    }
 
     return res.status(200).json({
       message: 'OTP resent successfully',
@@ -309,6 +324,41 @@ export const googleLogin = async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Google login error:', error);
+    return res.status(500).json({
+      message: 'Something went wrong',
+    });
+  }
+};
+
+export const getAuthMe = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user?.userId;
+    if (!userId) {
+      return res.status(401).json({
+        message: 'Unauthorized',
+      });
+    }
+
+    const user = await User.findById(userId).select('name email phone authProvider emailVerified');
+
+    if (!user) {
+      return res.status(404).json({
+        message: 'User not found',
+      });
+    }
+
+    return res.status(200).json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        authProvider: user.authProvider,
+        emailVerified: user.emailVerified,
+      },
+    });
+  } catch (error) {
+    console.error('Get me error:', error);
     return res.status(500).json({
       message: 'Something went wrong',
     });
